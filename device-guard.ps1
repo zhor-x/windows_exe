@@ -71,10 +71,19 @@ function Show-WipeWarning {
 }
 
 function Invoke-DeviceWipe {
-    Write-Log "Инициирован сброс устройства (после подтверждённого таймаута)."
-    # systemreset.exe -factoryreset
-    # Reset-Computer -RemoveData -ResetType Full
-    Write-Log "ЗАГЛУШКА: здесь вызывается реальная команда сброса."
+    Write-Log "Инициирован полный сброс устройства (factory reset)."
+
+    try {
+        # Реальная команда сброса
+        Start-Process -FilePath "systemreset" -ArgumentList "-factoryreset" -NoNewWindow
+        Write-Log "Команда systemreset -factoryreset успешно запущена."
+    }
+    catch {
+        Write-Log "ОШИБКА при запуске сброса: $_"
+
+        # Запасной вариант
+        shutdown /r /t 10 /f /c "DeviceGuard: Выполняется принудительный сброс устройства"
+    }
 }
 
 Write-Log "DeviceGuard запущен. DeviceId=$($deviceConfig.DeviceId) PollInterval=$($Config.PollInterval)s"
@@ -84,17 +93,26 @@ while ($true) {
         $headers = @{ "Authorization" = "Bearer $($Config.DeviceToken)" }
         $response = Invoke-RestMethod -Uri $Config.ApiUrl -Headers $headers -Method Get -TimeoutSec 15
 
-        Write-Log "Опрос API: wipe=$($response.wipe)"
+        Write-Log "Опрос API: wipe=$($response.wipe), force=$($response.force)"
 
         if ($response.wipe -eq $true) {
-            Write-Log "Получен сигнал wipe=true. Показываю предупреждение пользователю."
-            $result = Show-WipeWarning -Minutes $Config.CountdownMin
+            $isForced = $response.force -eq $true   # Для MDM
 
-            if ($result -eq "cancelled") {
-                Write-Log "Пользователь отменил сброс."
-            } else {
+            if ($isForced) {
+                Write-Log "Получена ПРИНУДИТЕЛЬНАЯ команда от MDM. Выполняем сброс БЕЗ предупреждения."
                 Invoke-DeviceWipe
                 break
+            }
+            else {
+                Write-Log "Получен сигнал wipe=true. Показываю предупреждение."
+                $result = Show-WipeWarning -Minutes $Config.CountdownMin
+
+                if ($result -eq "cancelled") {
+                    Write-Log "Пользователь отменил сброс."
+                } else {
+                    Invoke-DeviceWipe
+                    break
+                }
             }
         }
     }
