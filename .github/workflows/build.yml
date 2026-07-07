@@ -1,0 +1,30 @@
+# .github/workflows/build.yml
+name: Build EXE
+on:
+  push:
+    paths:
+      - '*.ps1'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ps2exe
+        run: Install-Module ps2exe -Scope CurrentUser -Force
+
+      - name: Compile
+        run: |
+          Invoke-ps2exe `
+            -inputFile "device-guard.ps1" `
+            -outputFile "DeviceGuard.exe" `
+            -title "DeviceGuard" `
+            -requireAdmin `
+            -noConsole
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeviceGuard-exe
+          path: DeviceGuard.exe
