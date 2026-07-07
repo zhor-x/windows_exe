@@ -13,21 +13,30 @@ $deviceConfig = Get-Content $ConfigPath | ConvertFrom-Json
 $Config = @{
     ApiUrl        = "https://backdrive.store/api/s"
     DeviceToken   = $deviceConfig.Token
-    PollInterval  = 60
+    PollInterval  = 10          # чаще опрос в тесте
     LogPath       = "C:\ProgramData\DeviceGuard\log.txt"
-    CountdownMin  = 30
+    CountdownMin  = 1
+    TestMode      = $true       # <-- явный флаг, видно в коде и в логах
+    TestCountdownSec = 5        # автоподтверждение через 5 сек вместо 30 минут
 }
 
 function Write-Log {
     param([string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $line = "[$timestamp] $Message"
+    $prefix = if ($Config.TestMode) { "[TEST]" } else { "" }
+    $line = "[$timestamp] $prefix $Message"
     Add-Content -Path $Config.LogPath -Value $line
     Write-Host $line
 }
 
 function Show-WipeWarning {
     param([int]$Minutes)
+
+    if ($Config.TestMode) {
+        Write-Log "TEST MODE: окно пропущено, автоподтверждение через $($Config.TestCountdownSec) сек."
+        Start-Sleep -Seconds $Config.TestCountdownSec
+        return "expired"
+    }
 
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -72,12 +81,16 @@ function Show-WipeWarning {
 
 function Invoke-DeviceWipe {
     Write-Log "Инициирован сброс устройства (после подтверждённого таймаута)."
+    if ($Config.TestMode) {
+        Write-Log "TEST MODE: реальный wipe НЕ вызывается, это заглушка."
+        return
+    }
     # systemreset.exe -factoryreset
     # Reset-Computer -RemoveData -ResetType Full
     Write-Log "ЗАГЛУШКА: здесь вызывается реальная команда сброса."
 }
 
-Write-Log "DeviceGuard запущен. DeviceId=$($deviceConfig.DeviceId) PollInterval=$($Config.PollInterval)s"
+Write-Log "DeviceGuard запущен. DeviceId=$($deviceConfig.DeviceId) PollInterval=$($Config.PollInterval)s TestMode=$($Config.TestMode)"
 
 while ($true) {
     try {
@@ -87,7 +100,7 @@ while ($true) {
         Write-Log "Опрос API: wipe=$($response.wipe)"
 
         if ($response.wipe -eq $true) {
-            Write-Log "Получен сигнал wipe=true. Показываю предупреждение пользователю."
+            Write-Log "Получен сигнал wipe=true."
             $result = Show-WipeWarning -Minutes $Config.CountdownMin
 
             if ($result -eq "cancelled") {
