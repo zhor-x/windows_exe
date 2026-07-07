@@ -18,7 +18,7 @@ if (-not (Test-Path $ConfigPath)) {
     $newConfig | ConvertTo-Json -Depth 3 | Out-File -FilePath $ConfigPath -Encoding UTF8
 
     Write-Host "Создан config.json → $ConfigPath" -ForegroundColor Green
-    Write-Host "Заполните поле 'Token' и перезапустите скрипт!" -ForegroundColor Red
+    Write-Host "Заполните поле 'Token' и перезапустите!" -ForegroundColor Red
     Start-Sleep -Seconds 10
     exit 0
 }
@@ -27,7 +27,7 @@ if (-not (Test-Path $ConfigPath)) {
 $deviceConfig = Get-Content $ConfigPath | ConvertFrom-Json
 
 if ([string]::IsNullOrWhiteSpace($deviceConfig.Token)) {
-    Write-Host "Ошибка: Token не заполнен в config.json!" -ForegroundColor Red
+    Write-Host "Ошибка: Token не заполнен!" -ForegroundColor Red
     exit 1
 }
 
@@ -70,45 +70,54 @@ function Show-WipeWarning {
     $cancelButton.Text = "ОТМЕНА"
     $cancelButton.Location = New-Object System.Drawing.Point(150, 130)
     $cancelButton.Size = New-Object System.Drawing.Size(150, 40)
-    $cancelButton.Add_Click({
-        $form.Tag = "cancelled"
-        $form.Close()
-    })
+    $cancelButton.Add_Click({ $form.Tag = "cancelled"; $form.Close() })
     $form.Controls.Add($cancelButton)
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = $Minutes * 60 * 1000
-    $timer.Add_Tick({
-        $form.Tag = "expired"
-        $timer.Stop()
-        $form.Close()
-    })
+    $timer.Add_Tick({ $form.Tag = "expired"; $timer.Stop(); $form.Close() })
     $timer.Start()
 
     $form.Add_Shown({ $form.Activate() })
     [void]$form.ShowDialog()
-
     return $form.Tag
 }
 
+# ====================== ПОЛНЫЙ СБРОС ======================
 function Invoke-DeviceWipe {
-    Write-Log "ЗАПУСК ПОЛНОГО УНИЧТОЖЕНИЯ ДАННЫХ"
+    Write-Log "НАЧИНАЕМ ПОЛНОЕ УНИЧТОЖЕНИЕ ВСЕХ ДАННЫХ (включая пользователей)"
 
     try {
-        Write-Log "Очистка временных файлов..."
+        Write-Log "Удаляем все пользовательские профили..."
+
+        # Удаляем все профили пользователей кроме системных
+        Get-WmiObject Win32_UserProfile | Where-Object {
+            $_.LocalPath -like "C:\Users\*" -and
+            $_.Loaded -eq $false -and
+            $_.Special -eq $false
+        } | ForEach-Object {
+            Write-Log "Удаляем профиль: $($_.LocalPath)"
+            Remove-Item $_.LocalPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        Write-Log "Очистка временных и кэш файлов..."
         Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "C:\Users\*\AppData\Local\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "C:\Users\*\AppData\Local\Microsoft\Windows\WebCache\*" -Recurse -Force -ErrorAction SilentlyContinue
 
-        Write-Log "Переход в среду восстановления для полного сброса..."
-        shutdown /r /o /f /t 05 /c "DeviceGuard: Полный сброс устройства"
+        Write-Log "Переход в среду восстановления для финального сброса..."
+        # Это самая важная команда — переводит в Advanced Startup Options
+        shutdown /r /o /f /t 05 /c "DeviceGuard: Полное удаление всех данных"
 
-        Write-Log "Команда отправлена успешно."
+        Write-Log "Команда на сброс успешно отправлена."
     }
     catch {
-        Write-Log "Ошибка: $_"
+        Write-Log "Ошибка во время очистки: $_"
         shutdown /r /f /t 05 /c "DeviceGuard: Принудительный сброс"
     }
 }
+# ============================================================
 
 Write-Log "DeviceGuard запущен. DeviceId=$($deviceConfig.DeviceId)"
 
@@ -123,7 +132,7 @@ while ($true) {
             $isForced = $response.force -eq $true
 
             if ($isForced) {
-                Write-Log "MDM: Принудительный сброс БЕЗ предупреждения."
+                Write-Log "MDM: ПРИНУДИТЕЛЬНЫЙ полный сброс."
                 Invoke-DeviceWipe
                 break
             }
@@ -132,7 +141,7 @@ while ($true) {
                 $result = Show-WipeWarning -Minutes $Config.CountdownMin
 
                 if ($result -eq "cancelled") {
-                    Write-Log "Пользователь отменил сброс."
+                    Write-Log "Сброс отменён."
                 } else {
                     Invoke-DeviceWipe
                     break
@@ -141,7 +150,7 @@ while ($true) {
         }
     }
     catch {
-        Write-Log "Ошибка запроса к API: $_"
+        Write-Log "Ошибка API: $_"
     }
 
     Start-Sleep -Seconds $Config.PollInterval
