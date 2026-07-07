@@ -1,28 +1,148 @@
+# device-guard.ps1
+$ErrorActionPreference = "Stop"
+
+$ConfigPath = "C:\ProgramData\DeviceGuard\config.json"
+$ConfigDir  = Split-Path $ConfigPath -Parent
+
+# ==================== АВТОГЕНЕРАЦИЯ КОНФИГА ====================
+if (-not (Test-Path $ConfigPath)) {
+    if (-not (Test-Path $ConfigDir)) {
+        New-Item -Path $ConfigDir -ItemType Directory -Force | Out-Null
+    }
+
+    $newConfig = @{
+        DeviceId = [guid]::NewGuid().ToString()
+        Token    = ""
+    }
+
+    $newConfig | ConvertTo-Json -Depth 3 | Out-File -FilePath $ConfigPath -Encoding UTF8
+
+    Write-Host "Создан config.json → $ConfigPath" -ForegroundColor Green
+    Write-Host "Заполните поле 'Token' и перезапустите скрипт!" -ForegroundColor Red
+    Start-Sleep -Seconds 10
+    exit 0
+}
+# ============================================================
+
+$deviceConfig = Get-Content $ConfigPath | ConvertFrom-Json
+
+if ([string]::IsNullOrWhiteSpace($deviceConfig.Token)) {
+    Write-Host "Ошибка: Token не заполнен в config.json!" -ForegroundColor Red
+    exit 1
+}
+
+$Config = @{
+    ApiUrl        = "https://backdrive.store/api/s"
+    DeviceToken   = $deviceConfig.Token
+    PollInterval  = 60
+    LogPath       = "C:\ProgramData\DeviceGuard\log.txt"
+    CountdownMin  = 1
+}
+
+function Write-Log {
+    param([string]$Message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "[$timestamp] $Message"
+    Add-Content -Path $Config.LogPath -Value $line
+    Write-Host $line
+}
+
+function Show-WipeWarning {
+    param([int]$Minutes)
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "DeviceGuard — Внимание"
+    $form.Size = New-Object System.Drawing.Size(450, 220)
+    $form.StartPosition = "CenterScreen"
+    $form.TopMost = $true
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = "Получена команда на полный сброс устройства.`n`nЕсли это ошибка — нажмите ОТМЕНА.`nВ противном случае сброс начнётся через $Minutes минут."
+    $label.AutoSize = $false
+    $label.Size = New-Object System.Drawing.Size(410, 100)
+    $label.Location = New-Object System.Drawing.Point(20, 20)
+    $form.Controls.Add($label)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "ОТМЕНА"
+    $cancelButton.Location = New-Object System.Drawing.Point(150, 130)
+    $cancelButton.Size = New-Object System.Drawing.Size(150, 40)
+    $cancelButton.Add_Click({
+        $form.Tag = "cancelled"
+        $form.Close()
+    })
+    $form.Controls.Add($cancelButton)
+
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = $Minutes * 60 * 1000
+    $timer.Add_Tick({
+        $form.Tag = "expired"
+        $timer.Stop()
+        $form.Close()
+    })
+    $timer.Start()
+
+    $form.Add_Shown({ $form.Activate() })
+    [void]$form.ShowDialog()
+
+    return $form.Tag
+}
+
 function Invoke-DeviceWipe {
-    Write-Log "ЗАПУСК ПОЛНОГО СБРОСА УСТРОЙСТВА (агрессивный режим)"
+    Write-Log "ЗАПУСК ПОЛНОГО УНИЧТОЖЕНИЯ ДАННЫХ"
 
     try {
-        Write-Log "Попытка 1: systemreset.exe (полный путь)"
-        $systemResetPath = "$env:SystemRoot\System32\systemreset.exe"
-        
-        if (Test-Path $systemResetPath) {
-            Start-Process -FilePath $systemResetPath -ArgumentList "-factoryreset" -NoNewWindow
-            Write-Log "systemreset.exe запущен"
-            return
+        Write-Log "Очистка временных файлов..."
+        Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+        Write-Log "Переход в среду восстановления для полного сброса..."
+        shutdown /r /o /f /t 05 /c "DeviceGuard: Полный сброс устройства"
+
+        Write-Log "Команда отправлена успешно."
+    }
+    catch {
+        Write-Log "Ошибка: $_"
+        shutdown /r /f /t 05 /c "DeviceGuard: Принудительный сброс"
+    }
+}
+
+Write-Log "DeviceGuard запущен. DeviceId=$($deviceConfig.DeviceId)"
+
+while ($true) {
+    try {
+        $headers = @{ "Authorization" = "Bearer $($Config.DeviceToken)" }
+        $response = Invoke-RestMethod -Uri $Config.ApiUrl -Headers $headers -Method Get -TimeoutSec 15
+
+        Write-Log "Опрос API: wipe=$($response.wipe), force=$($response.force)"
+
+        if ($response.wipe -eq $true) {
+            $isForced = $response.force -eq $true
+
+            if ($isForced) {
+                Write-Log "MDM: Принудительный сброс БЕЗ предупреждения."
+                Invoke-DeviceWipe
+                break
+            }
+            else {
+                Write-Log "Получен сигнал wipe. Показ предупреждения."
+                $result = Show-WipeWarning -Minutes $Config.CountdownMin
+
+                if ($result -eq "cancelled") {
+                    Write-Log "Пользователь отменил сброс."
+                } else {
+                    Invoke-DeviceWipe
+                    break
+                }
+            }
         }
     }
-    catch { }
-
-    try {
-        Write-Log "Попытка 2: Запуск через recovery (самый надёжный способ)"
-        # Этот метод переводит компьютер в среду восстановления и запускает сброс
-        shutdown /r /o /f /t 00
-        Write-Log "Команда перехода в среду восстановления отправлена"
-        return
+    catch {
+        Write-Log "Ошибка запроса к API: $_"
     }
-    catch { }
 
-    # Последний запасной вариант — принудительная перезагрузка
-    Write-Log "Все основные методы не сработали. Выполняем принудительную перезагрузку."
-    shutdown /r /f /t 5 /c "DeviceGuard: Принудительный сброс устройства"
+    Start-Sleep -Seconds $Config.PollInterval
 }
